@@ -1,18 +1,19 @@
 /* Copyright (C)
 * 2015 - John Melton, G0ORX/N6LYT
 *
-*   This program is free software: you can redistribute it and/or modify
-*   it under the terms of the GNU General Public License as published by
-*   the Free Software Foundation, either version 3 of the License, or
-*   (at your option) any later version.
+* This program is free software; you can redistribute it and/or
+* modify it under the terms of the GNU General Public License
+* as published by the Free Software Foundation; either version 2
+* of the License, or (at your option) any later version.
 *
-*   This program is distributed in the hope that it will be useful,
-*   but WITHOUT ANY WARRANTY; without even the implied warranty of
-*   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-*   GNU General Public License for more details.
+* This program is distributed in the hope that it will be useful,
+* but WITHOUT ANY WARRANTY; without even the implied warranty of
+* MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+* GNU General Public License for more details.
 *
-*   You should have received a copy of the GNU General Public License
-*   along with this program.  If not, see <https://www.gnu.org/licenses/>.
+* You should have received a copy of the GNU General Public License
+* along with this program; if not, write to the Free Software
+* Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 *
 */
 
@@ -30,365 +31,223 @@
 #include "band.h"
 #include "radio.h"
 #include "vfo.h"
-#ifdef TCI
-#include "tci.h"
-#endif
-#include "message.h"
-#include "mystring.h"
 
-static GtkWidget *dialog = NULL;
-static GtkWidget *serial_baud[MAX_SERIAL];
-static GtkWidget *serial_enable[MAX_SERIAL];
+int  serial_enable;
+char ser_port[64]="/dev/ttyACM0";
+int serial_baud_rate = B9600;
+int serial_parity = 0; // 0=none, 1=even, 2=odd
+gboolean rigctl_debug=FALSE;
+
+static GtkWidget *parent_window=NULL;
+static GtkWidget *menu_b=NULL;
+static GtkWidget *dialog=NULL;
+static GtkWidget *serial_port_entry;
 
 static void cleanup() {
-  if (dialog != NULL) {
-    GtkWidget *tmp = dialog;
-    dialog = NULL;
-    gtk_widget_destroy(tmp);
-    sub_menu = NULL;
-    active_menu  = NO_MENU;
-    radio_save_state();
+  if(dialog!=NULL) {
+    gtk_widget_destroy(dialog);
+    dialog=NULL;
+    sub_menu=NULL;
   }
 }
 
-static gboolean close_cb () {
+static gboolean close_cb (GtkWidget *widget, GdkEventButton *event, gpointer data) {
   cleanup();
   return TRUE;
 }
 
-static void tcp_autoreporting_cb(GtkWidget *widget, gpointer data) {
-  rigctl_tcp_autoreporting = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(widget));
+static gboolean delete_event(GtkWidget *widget, GdkEvent *event, gpointer user_data) {
+  cleanup();
+  return FALSE;
 }
 
 static void rigctl_value_changed_cb(GtkWidget *widget, gpointer data) {
-  if (rigctl_tcp_enable) { shutdown_tcp_rigctl(); }
+   rigctl_port_base = gtk_spin_button_get_value(GTK_SPIN_BUTTON(widget)); 
+}
 
-  rigctl_tcp_port = gtk_spin_button_get_value(GTK_SPIN_BUTTON(widget));
-
-  if (rigctl_tcp_enable) { launch_tcp_rigctl(); }
+static void serial_value_changed_cb(GtkWidget *widget, gpointer data) {
+     sprintf(ser_port,"/dev/ttyACM%0d",(int) gtk_spin_button_get_value(GTK_SPIN_BUTTON(widget))); 
+     fprintf(stderr,"RIGCTL_MENU: New Serial port=%s\n",ser_port);
 }
 
 static void rigctl_debug_cb(GtkWidget *widget, gpointer data) {
-  rigctl_debug = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(widget));
+  rigctl_debug=gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(widget));
+  g_print("---------- RIGCTL DEBUG %s ----------\n",rigctl_debug?"ON":"OFF");
 }
 
-#ifdef TCI
-static void tci_enable_cb(GtkWidget *widget, gpointer data) {
-  tci_enable = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(widget));
-  if (tci_enable) {
-    launch_tci();
+static void rigctl_enable_cb(GtkWidget *widget, gpointer data) {
+  rigctl_enable=gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(widget));
+  if(rigctl_enable) {
+     launch_rigctl();
   } else {
-    shutdown_tci();
-  }
-}
-
-static void tci_port_changed_cb(GtkWidget *widget, gpointer data) {
-  if (tci_enable) { shutdown_tci(); }
-
-  tci_port = gtk_spin_button_get_value(GTK_SPIN_BUTTON(widget));
-
-  if (tci_enable) { launch_tci(); }
-
-}
-
-static void tci_txonly_changed_cb(GtkWidget *widget, gpointer data) {
-  tci_txonly = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(widget));
-}
-#endif
-
-static void rigctl_tcp_enable_cb(GtkWidget *widget, gpointer data) {
-  rigctl_tcp_enable = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(widget));
-
-  if (rigctl_tcp_enable) {
-    launch_tcp_rigctl();
-  } else {
-    shutdown_tcp_rigctl();
-  }
-}
-
-//
-// Note that this call-back is invoked on each and every key stroke
-// in the text field
-//
-static void serial_port_cb(GtkWidget *widget, gpointer data) {
-  int id = GPOINTER_TO_INT(data);
-
-  if (SerialPorts[id].enable) {
-    //
-    // If this port is running, do not allow changes and
-    // re-init the text entry field
-    //
-    gtk_entry_set_text(GTK_ENTRY(widget), SerialPorts[id].port);
-  } else {
-    const char *cp = gtk_entry_get_text(GTK_ENTRY(widget));
-    STRLCPY(SerialPorts[id].port, cp, sizeof(SerialPorts[id].port));
-  }
-}
-
-static void tcp_andromeda_cb(GtkWidget *widget, gpointer data) {
-  rigctl_tcp_andromeda = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(widget));
-}
-
-//
-// Note the following call-backs will never be called for G2-internal serial ports:
-//
-// - serial_autoreporting_cb
-// - andromeda_cb
-// - serial_enable_cb
-// - baud_cb
-//
-//
-static void serial_autoreporting_cb(GtkWidget *widget, gpointer data) {
-  int id = GPOINTER_TO_INT(data);
-  SerialPorts[id].autoreporting = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(widget));
-}
-
-static void andromeda_cb(GtkWidget *widget, gpointer data) {
-  int id = GPOINTER_TO_INT(data);
-  SerialPorts[id].andromeda = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(widget));
-
-  if (SerialPorts[id].andromeda) {
-    gtk_combo_box_set_active(GTK_COMBO_BOX(serial_baud[id]), 1);
-    SerialPorts[id].baud = B9600;
+     disable_rigctl();
   }
 }
 
 static void serial_enable_cb(GtkWidget *widget, gpointer data) {
-  int id = GPOINTER_TO_INT(data);
-
-  if ((SerialPorts[id].enable = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(widget)))) {
-    if (launch_serial_rigctl(id) == 0) {
-      gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(widget), FALSE);
-      SerialPorts[id].enable = 0;
-    }
+  strcpy(ser_port,gtk_entry_get_text(GTK_ENTRY(serial_port_entry)));
+  serial_enable=gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(widget));
+  if(serial_enable) {
+     if(launch_serial() == 0) {
+        gtk_toggle_button_set_active( GTK_TOGGLE_BUTTON(widget),FALSE)	     ;
+     }	      
   } else {
-    disable_serial_rigctl(id);
+     disable_serial();
   }
-
-  t_print("%s: Serial enable : ID=%d Enabled=%d\n", __FUNCTION__, id, SerialPorts[id].enable);
 }
 
 // Set Baud Rate
-static void baud_cb(GtkWidget *widget, gpointer data) {
-  int id = GPOINTER_TO_INT(data);
-  int bd = gtk_combo_box_get_active(GTK_COMBO_BOX(widget));
-  int new;
+static void baud_rate_cb(GtkWidget *widget, gpointer data) {
+   serial_baud_rate = GPOINTER_TO_INT(data);
+   fprintf(stderr,"RIGCTL_MENU: Baud rate changed: %d\n",serial_baud_rate);
+}
 
-  //
-  // If ANDROMEDA is active, keep 9600
-  //
-  if (SerialPorts[id].andromeda && SerialPorts[id].baud == B9600) {
-    gtk_combo_box_set_active(GTK_COMBO_BOX(widget), 1);
-    return;
-  }
-
-  //
-  // Do nothing if the baud rate is already effective.
-  // If a serial client is already running and the baud rate is changed, we close and re-open it
-  //
-  switch (bd) {
-  case 0:
-  default:
-    new = B4800;
-    break;
-
-  case 1:
-    new = B9600;
-    break;
-
-  case 2:
-    new = B19200;
-    break;
-
-  case 3:
-    new = B38400;
-    break;
-  }
-
-  if (new == SerialPorts[id].baud) {
-    return;
-  }
-
-  SerialPorts[id].baud = new;
-
-  if (SerialPorts[id].enable) {
-    t_print("%s: closing/re-opening serial port %s\n", __FUNCTION__, SerialPorts[id].port);
-    disable_serial_rigctl(id);
-
-    if (launch_serial_rigctl(id) == 0) {
-      gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(serial_enable[id]), FALSE);
-      SerialPorts[id].enable = 0;
-    }
-  }
-
-  t_print("%s: Baud rate changed: Port=%s Baud=%d\n", __FUNCTION__, SerialPorts[id].port, SerialPorts[id].baud);
+// Set Parity 0=None, 1=Even, 2=0dd
+static void parity_cb(GtkWidget *widget, gpointer data) {
+   serial_parity = GPOINTER_TO_INT(data);
+   fprintf(stderr,"RITCTL_MENU: Serial Parity changed=%d\n", serial_parity);
 }
 
 void rigctl_menu(GtkWidget *parent) {
-  GtkWidget *w;
-  dialog = gtk_dialog_new();
-  gtk_window_set_transient_for(GTK_WINDOW(dialog), GTK_WINDOW(parent));
-  GtkWidget *headerbar = gtk_header_bar_new();
-  gtk_window_set_titlebar(GTK_WINDOW(dialog), headerbar);
-  gtk_header_bar_set_show_close_button(GTK_HEADER_BAR(headerbar), TRUE);
-#ifdef TCI
-  gtk_header_bar_set_title(GTK_HEADER_BAR(headerbar), "piHPSDR - CAT/TCI");
-#else
-  gtk_header_bar_set_title(GTK_HEADER_BAR(headerbar), "piHPSDR - CAT");
-#endif
-  g_signal_connect (dialog, "delete_event", G_CALLBACK (close_cb), NULL);
-  g_signal_connect (dialog, "destroy", G_CALLBACK (close_cb), NULL);
-  GtkWidget *content = gtk_dialog_get_content_area(GTK_DIALOG(dialog));
-  GtkWidget *grid = gtk_grid_new();
-  gtk_grid_set_row_spacing (GTK_GRID(grid), 5);
-  gtk_grid_set_column_spacing (GTK_GRID(grid), 10);
-  int row = 0;
-  w = gtk_button_new_with_label("Close");
-  gtk_widget_set_name(w, "close_button");
-  g_signal_connect (w, "button-press-event", G_CALLBACK(close_cb), NULL);
-  gtk_grid_attach(GTK_GRID(grid), w, 0, row, 2, 1);
+  parent_window=parent;
 
-#ifdef TCI
-  w = gtk_check_button_new_with_label("Enable CAT/TCI Debug Logging");
-#else
-  w = gtk_check_button_new_with_label("Enable CAT Debug Logging");
-#endif
-  gtk_widget_set_name(w, "boldlabel");
-  gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (w), rigctl_debug);
-  gtk_grid_attach(GTK_GRID(grid), w, 4, row, 4, 1);
-  g_signal_connect(w, "toggled", G_CALLBACK(rigctl_debug_cb), NULL);
+  dialog=gtk_dialog_new();
+  gtk_window_set_transient_for(GTK_WINDOW(dialog),GTK_WINDOW(parent_window));
+  //gtk_window_set_decorated(GTK_WINDOW(dialog),FALSE);
+  gtk_window_set_title(GTK_WINDOW(dialog),"piHPSDR - RIGCTL");
+  g_signal_connect (dialog, "delete_event", G_CALLBACK (delete_event), NULL);
 
-  row++;
-  w = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
-  gtk_widget_set_size_request(w, -1, 3);
-  gtk_grid_attach(GTK_GRID(grid), w, 0, row, 7, 1);
+  GdkRGBA color;
+  color.red = 1.0;
+  color.green = 1.0;
+  color.blue = 1.0;
+  color.alpha = 1.0;
+  gtk_widget_override_background_color(dialog,GTK_STATE_FLAG_NORMAL,&color);
 
-  row++;
-  w = gtk_label_new("TCP");
-  gtk_widget_set_name(w, "boldlabel");
-  gtk_widget_set_halign(w, GTK_ALIGN_END);
-  gtk_grid_attach(GTK_GRID(grid), w, 0, row, 1, 1);
-  w = gtk_spin_button_new_with_range(18000, 21000, 1);
-  gtk_spin_button_set_value(GTK_SPIN_BUTTON(w), (double)rigctl_tcp_port);
-  gtk_grid_attach(GTK_GRID(grid), w, 1, row, 1, 1);
-  g_signal_connect(w, "value_changed", G_CALLBACK(rigctl_value_changed_cb), NULL);
-  w = gtk_check_button_new_with_label("Enable");
-  gtk_widget_set_name(w, "boldlabel");
-  gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (w), rigctl_tcp_enable);
-  gtk_widget_show(w);
-  gtk_grid_attach(GTK_GRID(grid), w, 4, row, 1, 1);
-  g_signal_connect(w, "toggled", G_CALLBACK(rigctl_tcp_enable_cb), NULL);
-  w = gtk_check_button_new_with_label("Andromeda");
-  gtk_widget_set_name(w, "boldlabel");
-  gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (w), rigctl_tcp_andromeda);
-  gtk_grid_attach(GTK_GRID(grid), w, 5, row, 1, 1);
-  g_signal_connect(w, "toggled", G_CALLBACK(tcp_andromeda_cb), NULL);
-  w = gtk_check_button_new_with_label("AutoRprt");
-  gtk_widget_set_name(w, "boldlabel");
-  gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (w), rigctl_tcp_autoreporting);
-  gtk_grid_attach(GTK_GRID(grid), w, 6, row, 1, 1);
-  g_signal_connect(w, "toggled", G_CALLBACK(tcp_autoreporting_cb), NULL);
+  GtkWidget *content=gtk_dialog_get_content_area(GTK_DIALOG(dialog));
 
-  /* Put the Serial Port stuff here, one port per line */
-  for (int i = 0; i < MAX_SERIAL; i++) {
-    char str[64];
-    row++;
-    snprintf (str, 64, "Serial");
-    w = gtk_label_new(str);
-    gtk_widget_set_name(w, "boldlabel");
-    gtk_widget_set_halign(w, GTK_ALIGN_END);
-    gtk_grid_attach(GTK_GRID(grid), w, 0, row, 1, 1);
-    w = gtk_entry_new();
-    gtk_entry_set_text(GTK_ENTRY(w), SerialPorts[i].port);
-    gtk_grid_attach(GTK_GRID(grid), w, 1, row, 2, 1);
-    g_signal_connect(w, "changed", G_CALLBACK(serial_port_cb), GINT_TO_POINTER(i));
+  GtkWidget *grid=gtk_grid_new();
+  gtk_grid_set_column_spacing (GTK_GRID(grid),10);
+  //gtk_grid_set_row_spacing (GTK_GRID(grid),10);
+  //gtk_grid_set_row_homogeneous(GTK_GRID(grid),TRUE);
+  //gtk_grid_set_column_homogeneous(GTK_GRID(grid),TRUE);
 
-    //
-    // If this serial port is used internally in a G2, there are not user choices
-    // except the port name
-    //
-    if (!SerialPorts[i].g2) {
-      serial_baud[i] = gtk_combo_box_text_new();
-      gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(serial_baud[i]), NULL, "4800 Bd");
-      gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(serial_baud[i]), NULL, "9600 Bd");
-      gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(serial_baud[i]), NULL, "19200 Bd");
-      gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(serial_baud[i]), NULL, "38400 Bd");
+  GtkWidget *close_b=gtk_button_new_with_label("Close");
+  g_signal_connect (close_b, "pressed", G_CALLBACK(close_cb), NULL);
+  gtk_grid_attach(GTK_GRID(grid),close_b,0,0,1,1);
 
-      switch (SerialPorts[i].baud) {
-      case B9600:
-        gtk_combo_box_set_active(GTK_COMBO_BOX(serial_baud[i]), 1);
-        break;
+  GtkWidget *rigctl_debug_b=gtk_check_button_new_with_label("Debug");
+  gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (rigctl_debug_b), rigctl_debug);
+  gtk_widget_show(rigctl_debug_b);
+  gtk_grid_attach(GTK_GRID(grid),rigctl_debug_b,3,0,1,1);
+  g_signal_connect(rigctl_debug_b,"toggled",G_CALLBACK(rigctl_debug_cb),NULL);
+ 
+  GtkWidget *rigctl_enable_b=gtk_check_button_new_with_label("Rigctl Enable");
+  //gtk_widget_override_font(tx_out_of_band_b, pango_font_description_from_string("Arial 18"));
+  gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (rigctl_enable_b), rigctl_enable);
+  gtk_widget_show(rigctl_enable_b);
+  gtk_grid_attach(GTK_GRID(grid),rigctl_enable_b,0,1,1,1);
+  g_signal_connect(rigctl_enable_b,"toggled",G_CALLBACK(rigctl_enable_cb),NULL);
+ 
+  GtkWidget *rigctl_port_label =gtk_label_new(NULL);
+  gtk_label_set_markup(GTK_LABEL(rigctl_port_label), "<b>RigCtl Port Number</b>");
+  //gtk_widget_override_font(band_label, pango_font_description_from_string("Arial 18"));
+  gtk_widget_show(rigctl_port_label);
+  gtk_grid_attach(GTK_GRID(grid),rigctl_port_label,0,2,1,1);
 
-      case B19200:
-        gtk_combo_box_set_active(GTK_COMBO_BOX(serial_baud[i]), 2);
-        break;
+  GtkWidget *rigctl_port_spinner =gtk_spin_button_new_with_range(18000,21000,1);
+  //gtk_widget_override_font(rigctl_r, pango_font_description_from_string("Arial 18"));
+  gtk_spin_button_set_value(GTK_SPIN_BUTTON(rigctl_port_spinner),(double)19090);
+  gtk_widget_show(rigctl_port_spinner);
+  gtk_grid_attach(GTK_GRID(grid),rigctl_port_spinner,1,2,2,1);
+  g_signal_connect(rigctl_port_spinner,"value_changed",G_CALLBACK(rigctl_value_changed_cb),NULL);
 
-      case B38400:
-        gtk_combo_box_set_active(GTK_COMBO_BOX(serial_baud[i]), 3);
-        break;
+  /* Put the Serial Port stuff here */
+  GtkWidget *serial_enable_b=gtk_check_button_new_with_label("Serial Port Enable");
+  gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (serial_enable_b), serial_enable);
+  gtk_widget_show(serial_enable_b);
+  gtk_grid_attach(GTK_GRID(grid),serial_enable_b,0,3,1,1);
+  g_signal_connect(serial_enable_b,"toggled",G_CALLBACK(serial_enable_cb),NULL);
 
-      default:
-        SerialPorts[i].baud = B4800;
-        gtk_combo_box_set_active(GTK_COMBO_BOX(serial_baud[i]), 0);
-        break;
-      }
+  GtkWidget *serial_text_label=gtk_label_new(NULL);
+  gtk_label_set_markup(GTK_LABEL(serial_text_label), "<b>Serial Port: </b>");
+  gtk_grid_attach(GTK_GRID(grid),serial_text_label,0,4,1,1);
 
-      my_combo_attach(GTK_GRID(grid), serial_baud[i], 3, row, 1, 1);
-      g_signal_connect(serial_baud[i], "changed", G_CALLBACK(baud_cb), GINT_TO_POINTER(i));
-      serial_enable[i] = gtk_check_button_new_with_label("Enable");
-      gtk_widget_set_name(serial_enable[i], "boldlabel");
-      gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (serial_enable[i]), SerialPorts[i].enable);
-      gtk_grid_attach(GTK_GRID(grid), serial_enable[i], 4, row, 1, 1);
-      g_signal_connect(serial_enable[i], "toggled", G_CALLBACK(serial_enable_cb), GINT_TO_POINTER(i));
-      w = gtk_check_button_new_with_label("Andromeda");
-      gtk_widget_set_name(w, "boldlabel");
-      gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (w), SerialPorts[i].andromeda);
-      gtk_grid_attach(GTK_GRID(grid), w, 5, row, 1, 1);
-      g_signal_connect(w, "toggled", G_CALLBACK(andromeda_cb), GINT_TO_POINTER(i));
-      w = gtk_check_button_new_with_label("AutoRprt");
-      gtk_widget_set_name(w, "boldlabel");
-      gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (w), SerialPorts[i].autoreporting);
-      gtk_grid_attach(GTK_GRID(grid), w, 6, row, 1, 1);
-      g_signal_connect(w, "toggled", G_CALLBACK(serial_autoreporting_cb), GINT_TO_POINTER(i));
-    } else {
-      snprintf (str, 64, "This port is used for G2-internal communication");
-      w = gtk_label_new(str);
-      gtk_widget_set_name(w, "boldlabel");
-      gtk_widget_set_halign(w, GTK_ALIGN_START);
-      gtk_grid_attach(GTK_GRID(grid), w, 3, row, 3, 1);
-    }
-  }
+  serial_port_entry=gtk_entry_new();
+  gtk_entry_set_text(GTK_ENTRY(serial_port_entry),ser_port);
+  gtk_widget_show(serial_port_entry);
+  gtk_grid_attach(GTK_GRID(grid),serial_port_entry,1,4,2,1);
 
-#ifdef TCI
-  row++;
-  w = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
-  gtk_widget_set_size_request(w, -1, 3);
-  gtk_grid_attach(GTK_GRID(grid), w, 0, row, 7, 1);
-  row++;
-  w = gtk_label_new("TCI");
-  gtk_widget_set_name(w, "boldlabel");
-  gtk_widget_set_halign(w, GTK_ALIGN_END);
-  gtk_grid_attach(GTK_GRID(grid), w, 0, row, 1, 1);
-  w = gtk_spin_button_new_with_range(35000, 55000, 1);
-  gtk_spin_button_set_value(GTK_SPIN_BUTTON(w), (double)tci_port);
-  gtk_grid_attach(GTK_GRID(grid), w, 1, row, 1, 1);
-  g_signal_connect(w, "value_changed", G_CALLBACK(tci_port_changed_cb), NULL);
-  w = gtk_check_button_new_with_label("Enable");
-  gtk_widget_set_name(w, "boldlabel");
-  gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (w), tci_enable);
-  gtk_widget_show(w);
-  gtk_grid_attach(GTK_GRID(grid), w, 4, row, 1, 1);
-  g_signal_connect(w, "toggled", G_CALLBACK(tci_enable_cb), NULL);
-  w = gtk_check_button_new_with_label("Report TX Frequency Only");
-  gtk_widget_set_name(w, "boldlabel");
-  gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (w), tci_txonly);
-  gtk_widget_show(w);
-  gtk_grid_attach(GTK_GRID(grid), w, 5, row, 3, 1);
-  g_signal_connect(w, "toggled", G_CALLBACK(tci_txonly_changed_cb), NULL);
-#endif
+/*
+  GtkWidget *serial_port_spinner =gtk_spin_button_new_with_range(0,7,1);
+  gtk_spin_button_set_value(GTK_SPIN_BUTTON(serial_port_spinner),(double)0);
+  gtk_widget_show(serial_port_spinner);
+  gtk_grid_attach(GTK_GRID(grid),serial_port_spinner,1,4,1,1);
+  g_signal_connect(serial_port_spinner,"value_changed",G_CALLBACK(serial_value_changed_cb),NULL);
+*/
 
-  gtk_container_add(GTK_CONTAINER(content), grid);
-  sub_menu = dialog;
+  // Serial baud rate here
+  GtkWidget *baud_rate_label =gtk_label_new(NULL);
+  gtk_label_set_markup(GTK_LABEL(baud_rate_label), "<b>Baud Rate:</b>");
+  gtk_widget_show(baud_rate_label);
+  gtk_grid_attach(GTK_GRID(grid),baud_rate_label,0,5,1,1);
+  
+  GtkWidget *baud_rate_b4800=gtk_radio_button_new_with_label(NULL,"4800");
+  gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (baud_rate_b4800), serial_baud_rate == B4800);
+  gtk_widget_show(baud_rate_b4800);
+  gtk_grid_attach(GTK_GRID(grid),baud_rate_b4800,1,5,1,1);
+  g_signal_connect(baud_rate_b4800,"toggled",G_CALLBACK(baud_rate_cb),(gpointer *) B4800);
+
+  GtkWidget *baud_rate_b9600=gtk_radio_button_new_with_label_from_widget(GTK_RADIO_BUTTON(baud_rate_b4800),"9600");
+  gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (baud_rate_b9600), serial_baud_rate == B9600);
+  gtk_widget_show(baud_rate_b9600);
+  gtk_grid_attach(GTK_GRID(grid),baud_rate_b9600,2,5,1,1);
+  g_signal_connect(baud_rate_b9600,"toggled",G_CALLBACK(baud_rate_cb),(gpointer *) B9600);
+
+  GtkWidget *baud_rate_b19200=gtk_radio_button_new_with_label_from_widget(GTK_RADIO_BUTTON(baud_rate_b9600),"19200");
+  gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (baud_rate_b19200),serial_baud_rate == B19200);
+  gtk_widget_show(baud_rate_b19200);
+  gtk_grid_attach(GTK_GRID(grid),baud_rate_b19200,3,5,1,1);
+  g_signal_connect(baud_rate_b19200,"toggled",G_CALLBACK(baud_rate_cb),(gpointer *) B19200);
+
+  GtkWidget *baud_rate_b38400=gtk_radio_button_new_with_label_from_widget(GTK_RADIO_BUTTON(baud_rate_b19200),"38400");
+  gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (baud_rate_b38400),serial_baud_rate == B38400);
+  gtk_widget_show(baud_rate_b38400);
+  gtk_grid_attach(GTK_GRID(grid),baud_rate_b38400,4,5,1,1);
+  g_signal_connect(baud_rate_b38400,"toggled",G_CALLBACK(baud_rate_cb),(gpointer *) B38400);
+
+/*
+  // Serial parity
+  GtkWidget *parity_label =gtk_label_new("Parity:");
+  gtk_widget_show(parity_label);
+  gtk_grid_attach(GTK_GRID(grid),parity_label,0,6,1,1);
+  
+  GtkWidget *parity_none_b=gtk_radio_button_new_with_label(NULL,"None");
+  gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (parity_none_b), serial_parity == 0);
+  gtk_widget_show(parity_none_b);
+  gtk_grid_attach(GTK_GRID(grid),parity_none_b,1,6,1,1);
+  g_signal_connect(parity_none_b,"toggled",G_CALLBACK(parity_cb),(gpointer *) 0);
+
+  GtkWidget *parity_even_b=gtk_radio_button_new_with_label_from_widget(GTK_RADIO_BUTTON(parity_none_b),"Even");
+  gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (parity_even_b), serial_parity == 1);
+  gtk_widget_show(parity_even_b);
+  gtk_grid_attach(GTK_GRID(grid),parity_even_b,2,6,1,1);
+  g_signal_connect(parity_even_b,"toggled",G_CALLBACK(parity_cb),(gpointer *) 1);
+
+  GtkWidget *parity_odd_b=gtk_radio_button_new_with_label_from_widget(GTK_RADIO_BUTTON(parity_even_b),"Odd");
+  gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (parity_odd_b), serial_parity == 2);
+  gtk_widget_show(parity_odd_b);
+  gtk_grid_attach(GTK_GRID(grid),parity_odd_b,3,6,1,1);
+  g_signal_connect(parity_odd_b,"toggled",G_CALLBACK(parity_cb),(gpointer *) 1);
+*/
+
+
+  // Below stays put
+  gtk_container_add(GTK_CONTAINER(content),grid);
+
+  sub_menu=dialog;
+
   gtk_widget_show_all(dialog);
+
 }
 

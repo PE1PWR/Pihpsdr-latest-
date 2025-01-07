@@ -1,35 +1,16 @@
-/* Copyright (C)
-* 2017 - John Melton, G0ORX/N6LYT
-*
-*   This program is free software: you can redistribute it and/or modify
-*   it under the terms of the GNU General Public License as published by
-*   the Free Software Foundation, either version 3 of the License, or
-*   (at your option) any later version.
-*
-*   This program is distributed in the hope that it will be useful,
-*   but WITHOUT ANY WARRANTY; without even the implied warranty of
-*   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-*   GNU General Public License for more details.
-*
-*   You should have received a copy of the GNU General Public License
-*   along with this program.  If not, see <https://www.gnu.org/licenses/>.
-*
-*/
-
-#ifdef GPIO
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <linux/i2c-dev.h>
-#include <i2c/smbus.h>
+//#include <i2c/smbus.h>
 #include <sys/ioctl.h>
 #include <fcntl.h>
 
 #include <gtk/gtk.h>
-#include "i2c.h"
-#include "actions.h"
+//#include "i2c.h"
+#include "wiringPiI2C.h"
 #include "gpio.h"
 #include "band.h"
 #include "band_menu.h"
@@ -38,21 +19,12 @@
 #include "toolbar.h"
 #include "vfo.h"
 #include "ext.h"
-#include "message.h"
 
-char *i2c_device = "/dev/i2c-1";
-unsigned int i2c_address_1 = 0X20;
-unsigned int i2c_address_2 = 0X23;
+char *i2c_device="/dev/i2c-1";
+unsigned int i2c_address_1=0X20;
+unsigned int i2c_address_2=0X23;
 
-static int i2cfd;
-//
-// When reading the flags and ints registers of the
-// MCP23017, it is important that no other thread
-// (e.g., another instance of the interrupt service
-// routine), does this concurrently.
-// i2c_mutex guarantees this.
-//
-static GMutex i2c_mutex;
+static int fd;
 
 #define SW_2  0X8000
 #define SW_3  0X4000
@@ -71,154 +43,261 @@ static GMutex i2c_mutex;
 #define SW_16 0X0200
 #define SW_17 0X0100
 
-unsigned int i2c_sw[16] = {
-  SW_2, SW_3, SW_4, SW_5, SW_6, SW_14, SW_15, SW_13,
-  SW_12, SW_11, SW_10, SW_9, SW_7, SW_8, SW_16, SW_17
-};
+unsigned int i2c_sw[16]=
+    { SW_2,SW_3,SW_4,SW_5,SW_6,SW_7,SW_8,SW_9,
+      SW_10,SW_11,SW_12,SW_13,SW_14,SW_15,SW_16,SW_17 };
 
-static int write_byte_data(unsigned char reg, unsigned char data) {
+static int write_byte_data(unsigned char addr,unsigned char reg, unsigned char data) {
   int rc;
 
-  if ((rc = i2c_smbus_write_byte_data(i2cfd, reg, data & 0xFF)) < 0) {
-    t_print("%s: write REG_GCONF config failed: addr=%02X %s\n", __FUNCTION__, i2c_address_1, g_strerror(errno));
-  }
+  rc=wiringPiI2CWriteReg8(fd,reg,data);
+  
+  return 0;
+}
+
+static unsigned char read_byte_data(unsigned char addr,unsigned char reg) {
+  int rc;
+
+  rc=wiringPiI2CReadReg8(fd,reg);
 
   return rc;
 }
 
-#if 0
-//NOTUSED
-static unsigned char read_byte_data(unsigned char reg) {
-  __s32 data;
-  data = i2c_smbus_read_byte_data(i2cfd, reg);
-  return data & 0xFF;
+static unsigned int read_word_data(unsigned char addr,unsigned char reg) {
+  int rc;
+
+  rc=wiringPiI2CReadReg16(fd,reg);
+
+  return rc;
 }
 
-#endif
 
-static unsigned int read_word_data(unsigned char reg) {
-  __s32 data;
-  data = i2c_smbus_read_word_data(i2cfd, reg);
-  return data & 0xFFFF;
+static void frequencyStep(int pos) {
+  vfo_step(pos);
 }
 
 void i2c_interrupt() {
   unsigned int flags;
-  int i;
-  g_mutex_lock(&i2c_mutex);
+  unsigned int ints;
 
-  for (;;) {
-    flags = read_word_data(0x0E);
-
-    // bits in "flags" indicate which input lines triggered an interrupt
-    // Two interrupts occuring at about the same time can lead to multiple bits
-    // set in "flags" (or no bit set if interrupt has already been processed
-    // by another interrupt service routine). If we enter here (protected by
-    // the mutex), we handle all interrupts until no one is left (flags==0)
-    if (flags == 0) { break; }
-
-    unsigned int ints = read_word_data(0x10);
-
-    //t_print("%s: flags=%04X ints=%04X\n",__FUNCTION__,flags,ints);
-    // only those bits in "ints" matter where the corresponding position
-    // in "flags" is set. We have a PRESSED or RELEASED event depending on
-    // whether the bit in "ints" is set or clear.
-    for (i = 0; i < 16 && flags; i++) { // leave loop if no bits left in "flags"
-      if (i2c_sw[i] & flags) {
-        //t_print("%s: switches=%p sw=%d action=%d\n",__FUNCTION__,switches,i,switches[i].switch_function);
-        // The input line associated with switch #i has triggered an interrupt
-        // clear *this* bit in flags
-        flags &= ~i2c_sw[i];
-        schedule_action(switches[i].switch_function, (ints & i2c_sw[i]) ? PRESSED : RELEASED, 0);
+  do {
+    flags=read_word_data(i2c_address_1,0x0E);
+    if(flags) {
+      ints=read_word_data(i2c_address_1,0x10);
+//g_print("i2c_interrupt: flags=%04X ints=%04X\n",flags,ints);
+      if(ints) {
+        int i;
+        for(i=0;i<16;i++) {
+          if(i2c_sw[i]==ints) break;
+        }
+        if(i<16) {
+//g_print("i1c_interrupt: sw=%d action=%d\n",i,sw_action[i]);
+          switch(sw_action[i]) {
+            case TUNE:
+              if(can_transmit) {
+                int tune=getTune();
+                if(tune==0) tune=1; else tune=0;
+                  g_idle_add(ext_tune_update,GINT_TO_POINTER(tune));
+              }
+              break;
+            case MOX:
+              if(can_transmit) {
+                int mox=getMox();
+                if(mox==0) mox=1; else mox=0;
+                g_idle_add(ext_mox_update,GINT_TO_POINTER(mox));
+              }
+              break;
+            case PS:
+#ifdef PURESIGNAL
+              if(can_transmit) g_idle_add(ext_ps_update,NULL);
+#endif
+              break;
+            case TWO_TONE:
+              if(can_transmit) g_idle_add(ext_two_tone,NULL);
+              break;
+            case NR:
+              g_idle_add(ext_nr_update,NULL);
+              break;
+            case NB:
+              g_idle_add(ext_nb_update,NULL);
+              break;
+            case SNB:
+              g_idle_add(ext_snb_update,NULL);
+              break;
+            case RIT:
+              g_idle_add(ext_rit_update,NULL);
+              break;
+            case RIT_CLEAR:
+              g_idle_add(ext_rit_clear,NULL);
+              break;
+            case XIT:
+              if(can_transmit) g_idle_add(ext_xit_update,NULL);
+              break;
+            case XIT_CLEAR:
+              if(can_transmit) g_idle_add(ext_xit_clear,NULL);
+              break;
+            case BAND_PLUS:
+              g_idle_add(ext_band_plus,NULL);
+              break;
+            case BAND_MINUS:
+              g_idle_add(ext_band_minus,NULL);
+              break;
+            case BANDSTACK_PLUS:
+              g_idle_add(ext_bandstack_plus,NULL);
+              break;
+            case BANDSTACK_MINUS:
+              g_idle_add(ext_bandstack_minus,NULL);
+              break;
+            case MODE_PLUS:
+              g_idle_add(ext_mode_plus,NULL);
+              break;
+            case MODE_MINUS:
+              g_idle_add(ext_mode_minus,NULL);
+              break;
+            case FILTER_PLUS:
+              g_idle_add(ext_filter_plus,NULL);
+              break;
+            case FILTER_MINUS:
+              g_idle_add(ext_filter_minus,NULL);
+              break;
+            case A_TO_B:
+              g_idle_add(ext_vfo_a_to_b,NULL);
+              break;
+            case B_TO_A:
+              g_idle_add(ext_vfo_b_to_a,NULL);
+              break;
+            case A_SWAP_B:
+              g_idle_add(ext_vfo_a_swap_b,NULL);
+              break;
+            case LOCK:
+              g_idle_add(ext_lock_update,NULL);
+              break;
+            case CTUN:
+              g_idle_add(ext_ctun_update,NULL);
+              break;
+            case AGC:
+              g_idle_add(ext_agc_update,NULL);
+              break;
+            case SPLIT:
+              if(can_transmit) g_idle_add(ext_split_toggle,NULL);
+              break;
+            case DIVERSITY:
+              g_idle_add(ext_diversity_update,GINT_TO_POINTER(0));
+              break;
+            case SAT:
+              if(can_transmit) g_idle_add(ext_sat_update,NULL);
+              break;
+            case MENU_BAND:
+              g_idle_add(ext_band_update,NULL);
+              break;
+            case MENU_BANDSTACK:
+              g_idle_add(ext_bandstack_update,NULL);
+              break;
+            case MENU_MODE:
+              g_idle_add(ext_mode_update,NULL);
+              break;
+            case MENU_FILTER:
+              g_idle_add(ext_filter_update,NULL);
+              break;
+            case MENU_FREQUENCY:
+              g_idle_add(ext_frequency_update,NULL);
+              break;
+            case MENU_MEMORY:
+              g_idle_add(ext_memory_update,NULL);
+              break;
+            case MENU_DIVERSITY:
+              g_idle_add(ext_diversity_update,GINT_TO_POINTER(1));
+              break;
+            case MENU_PS:
+#ifdef PURESIGNAL
+              g_idle_add(ext_start_ps,NULL);
+#endif
+              break;
+            case FUNCTION:
+              g_idle_add(ext_function_update,NULL);
+              break;
+            case MUTE:
+              g_idle_add(ext_mute_update,NULL);
+              break;
+            case PAN_MINUS:
+              g_idle_add(ext_pan_update,GINT_TO_POINTER(-100));
+              break;
+            case PAN_PLUS:
+              g_idle_add(ext_pan_update,GINT_TO_POINTER(100));
+              break;
+            case ZOOM_MINUS:
+              g_idle_add(ext_zoom_update,GINT_TO_POINTER(-1));
+              break;
+            case ZOOM_PLUS:
+              g_idle_add(ext_zoom_update,GINT_TO_POINTER(1));
+              break;
+          }
+        }
       }
     }
-  }
-
-  g_mutex_unlock(&i2c_mutex);
+  } while(flags!=0);
 }
 
 void i2c_init() {
-  int flags;
-  t_print("%s: open i2c device %s\n", __FUNCTION__, i2c_device);
-  i2cfd = open(i2c_device, O_RDWR);
 
-  if (i2cfd < 0) {
-    t_print("%s: open i2c device %s failed: %s\n", __FUNCTION__, i2c_device, g_strerror(errno));
+  int flags, ints;
+
+fprintf(stderr,"i2c_init: %s\n",i2c_device);
+
+  fd=wiringPiI2CSetupInterface(i2c_device, i2c_address_1);
+  if(fd<0) {
+    g_print("i2c_init failed: fd=%d\n",fd);
     return;
   }
-
-  t_print("%s: open i2c device %s fd=%d\n", __FUNCTION__, i2c_device, i2cfd);
-
-  if (ioctl(i2cfd, I2C_SLAVE, i2c_address_1) < 0) {
-    t_print("%s: ioctl i2c slave %d failed: %s\n", __FUNCTION__, i2c_address_1, g_strerror(errno));
-    return;
-  }
-
-  g_mutex_init(&i2c_mutex);
 
   // setup i2c
-  if (write_byte_data(0x0A, 0x44) < 0) { return; }
-
-  if (write_byte_data(0x0B, 0x44) < 0) { return; }
+  if(write_byte_data(i2c_address_1,0x0A,0x44)<0) return;
+  if(write_byte_data(i2c_address_1,0x0B,0x44)<0) return;
 
   // disable interrupt
-  if (write_byte_data(0x04, 0x00) < 0) { return; }
-
-  if (write_byte_data(0x05, 0x00) < 0) { return; }
+  if(write_byte_data(i2c_address_1,0x04,0x00)<0) return;
+  if(write_byte_data(i2c_address_1,0x05,0x00)<0) return;
 
   // clear defaults
-  if (write_byte_data(0x06, 0x00) < 0) { return; }
-
-  if (write_byte_data(0x07, 0x00) < 0) { return; }
+  if(write_byte_data(i2c_address_1,0x06,0x00)<0) return;
+  if(write_byte_data(i2c_address_1,0x07,0x00)<0) return;
 
   // OLAT
-  if (write_byte_data(0x14, 0x00) < 0) { return; }
-
-  if (write_byte_data(0x15, 0x00) < 0) { return; }
+  if(write_byte_data(i2c_address_1,0x14,0x00)<0) return;
+  if(write_byte_data(i2c_address_1,0x15,0x00)<0) return;
 
   // set GPIOA for pullups
-  if (write_byte_data(0x0C, 0xFF) < 0) { return; }
-
-  if (write_byte_data(0x0D, 0xFF) < 0) { return; }
+  if(write_byte_data(i2c_address_1,0x0C,0xFF)<0) return;
+  if(write_byte_data(i2c_address_1,0x0D,0xFF)<0) return;
 
   // reverse polarity
-  if (write_byte_data(0x02, 0xFF) < 0) { return; }
-
-  if (write_byte_data(0x03, 0xFF) < 0) { return; }
+  if(write_byte_data(i2c_address_1,0x02,0xFF)<0) return;
+  if(write_byte_data(i2c_address_1,0x03,0xFF)<0) return;
 
   // set GPIOA/B for input
-  if (write_byte_data(0x00, 0xFF) < 0) { return; }
-
-  if (write_byte_data(0x01, 0xFF) < 0) { return; }
+  if(write_byte_data(i2c_address_1,0x00,0xFF)<0) return;
+  if(write_byte_data(i2c_address_1,0x01,0xFF)<0) return;
 
   // INTCON
-  if (write_byte_data(0x08, 0x00) < 0) { return; }
-
-  if (write_byte_data(0x09, 0x00) < 0) { return; }
+  if(write_byte_data(i2c_address_1,0x08,0x00)<0) return;
+  if(write_byte_data(i2c_address_1,0x09,0x00)<0) return;
 
   // setup for an MCP23017 interrupt
-  if (write_byte_data(0x04, 0xFF) < 0) { return; }
-
-  if (write_byte_data(0x05, 0xFF) < 0) { return; }
+  if(write_byte_data(i2c_address_1,0x04,0xFF)<0) return;
+  if(write_byte_data(i2c_address_1,0x05,0xFF)<0) return;
 
   // flush any interrupts
-  g_mutex_lock(&i2c_mutex);
-  int count = 0;
-
+  int count=0;
   do {
-    flags = read_word_data(0x0E);
-
-    if (flags) {
-      (void) read_word_data(0x10);
+    flags=read_word_data(i2c_address_1,0x0E);
+    if(flags) {
+      ints=read_word_data(i2c_address_1,0x10);
+      fprintf(stderr,"flush interrupt: flags=%04X ints=%04X\n",flags,ints);
       count++;
-
-      if (count == 10) {
+      if(count==10) {
         return;
       }
     }
-  } while (flags != 0);
-
-  g_mutex_unlock(&i2c_mutex);
+  } while(flags!=0);
+  
 }
-
-#endif
